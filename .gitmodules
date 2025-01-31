@@ -1,0 +1,3 @@
+[submodule "submodules/simple-node-logger"]
+	path = submodules/simple-node-logger
+	url = https://github.com/p10tyr/simple-node-logger.git

@@ -5,21 +5,21 @@
   "main": "main.js",
   "license": "MIT",
   "author": {
-    "git" : "https://github.com/p10tyr/rtsp-to-onvif",
+    "git": "https://github.com/p10tyr/rtsp-to-onvif",
     "name": "Piotr Kula",
     "email": "rtsp2onvif@kula.email"
   },
   "forked": {
-    "git" : "https://github.com/daniela-hase/onvif-server",
+    "git": "https://github.com/daniela-hase/onvif-server",
     "name": "Daniela Hasenbring",
     "email": "daniela@koshigaya.de"
   },
   "dependencies": {
     "argparse": "2.0.1",
     "node-tcp-proxy": "0.0.28",
-    "node-uuid": "1.4.8",
-    "simple-node-logger": "21.8.12",
+    "simple-node-logger": "file:./submodules/simple-node-logger",
     "soap": "1.1.5",
+    "uuid": "^11.0.3",
     "xml2js": "0.6.2",
     "yaml": "2.6.1"
   }
