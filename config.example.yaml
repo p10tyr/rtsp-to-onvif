@@ -1,6 +1,7 @@
 onvif:
   - name: BulletCam                               # A user define named that will show up in the consumer device. Use letters only, no spaces or special characters
     dev: enp2s0 #eth0                             # Network interface to add virtual IP's too. use ip addr to find your name
+    ptz: false                                    # Set true if this cam supports PTZ — proxy advertises the PTZ service and forwards ContinuousMove/Stop/etc.
     target:
       hostname: 192.168.1.187                      # Your cameras IPv4 address
       ports:

@@ -13,7 +13,7 @@ function readConfig(logger, configFile) {
     } catch (error) {
         if (error.code === 'ENOENT') {
             logger.info(`File not found: ${configFile}`);
-            exit(-1);
+            process.exit(-1);
         }
         throw error;
     }
@@ -23,7 +23,7 @@ function readConfig(logger, configFile) {
         config = YAML.parse(configData);
     } catch (error) {
         logger.info('Failed to read config, invalid yaml syntax.')
-        exit(-1);
+        process.exit(-1);
     }
 
     return config;

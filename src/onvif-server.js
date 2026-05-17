@@ -8,6 +8,9 @@ const fs = require('fs');
 const logger = require('simple-node-logger');
 
 const { getIp4FromMac } = require('./net-tools')
+const EventsProxy = require('./events-proxy')
+const PtzProxy = require('./ptz-proxy')
+const ImagingProxy = require('./imaging-proxy')
 
 Date.prototype.stdTimezoneOffset = function () {
     let jan = new Date(this.getFullYear(), 0, 1);
@@ -23,6 +26,9 @@ module.exports = class OnvifServer {
     constructor(logger, config) {
         this.config = config;
         this.logger = logger;
+        this.eventsProxy = new EventsProxy(logger, config);
+        this.ptzProxy = config.ptz ? new PtzProxy(logger, config) : null;
+        this.imagingProxy = new ImagingProxy(logger, config);
 
         this.config.hostname = getIp4FromMac(logger, this.config.mac);
         if (!this.config.hostname)
@@ -235,6 +241,27 @@ module.exports = class OnvifServer {
                             }
                         }
 
+                        if (args.Category === undefined || args.Category == 'All' || args.Category == 'Events') {
+                            response.Capabilities['Events'] = {
+                                XAddr: `http://${this.config.hostname}:${this.config.ports.server}/onvif/Events`,
+                                WSSubscriptionPolicySupport: false,
+                                WSPullPointSupport: true,
+                                WSPausableSubscriptionManagerInterfaceSupport: false
+                            };
+                        }
+
+                        if (this.ptzProxy && (args.Category === undefined || args.Category == 'All' || args.Category == 'PTZ')) {
+                            response.Capabilities['PTZ'] = {
+                                XAddr: `http://${this.config.hostname}:${this.config.ports.server}/onvif/PTZ`
+                            };
+                        }
+
+                        if (args.Category === undefined || args.Category == 'All' || args.Category == 'Imaging') {
+                            response.Capabilities['Imaging'] = {
+                                XAddr: `http://${this.config.hostname}:${this.config.ports.server}/onvif/Imaging`
+                            };
+                        }
+
                         return response;
                     },
 
@@ -244,18 +271,27 @@ module.exports = class OnvifServer {
                                 {
                                     Namespace: 'http://www.onvif.org/ver10/device/wsdl',
                                     XAddr: `http://${this.config.hostname}:${this.config.ports.server}/onvif/device_service`,
-                                    Version: {
-                                        Major: 2,
-                                        Minor: 5,
-                                    }
+                                    Version: { Major: 2, Minor: 5 }
                                 },
                                 {
                                     Namespace: 'http://www.onvif.org/ver10/media/wsdl',
                                     XAddr: `http://${this.config.hostname}:${this.config.ports.server}/onvif/media_service`,
-                                    Version: {
-                                        Major: 2,
-                                        Minor: 5,
-                                    }
+                                    Version: { Major: 2, Minor: 5 }
+                                },
+                                {
+                                    Namespace: 'http://www.onvif.org/ver10/events/wsdl',
+                                    XAddr: `http://${this.config.hostname}:${this.config.ports.server}/onvif/Events`,
+                                    Version: { Major: 2, Minor: 5 }
+                                },
+                                ...(this.ptzProxy ? [{
+                                    Namespace: 'http://www.onvif.org/ver20/ptz/wsdl',
+                                    XAddr: `http://${this.config.hostname}:${this.config.ports.server}/onvif/PTZ`,
+                                    Version: { Major: 2, Minor: 5 }
+                                }] : []),
+                                {
+                                    Namespace: 'http://www.onvif.org/ver20/imaging/wsdl',
+                                    XAddr: `http://${this.config.hostname}:${this.config.ports.server}/onvif/Imaging`,
+                                    Version: { Major: 2, Minor: 5 }
                                 }
                             ]
                         };
@@ -332,6 +368,12 @@ module.exports = class OnvifServer {
             let image = fs.readFileSync('./resources/snapshot.png');
             response.writeHead(200, { 'Content-Type': 'image/png' });
             response.end(image, 'binary');
+        } else if (this.eventsProxy.matches(action)) {
+            this.eventsProxy.handle(request, response);
+        } else if (this.ptzProxy && this.ptzProxy.matches(action)) {
+            this.ptzProxy.handle(request, response);
+        } else if (this.imagingProxy.matches(action)) {
+            this.imagingProxy.handle(request, response);
         } else {
             response.writeHead(404, { 'Content-Type': 'text/plain' });
             response.write('404 Not Found\n');
@@ -342,7 +384,7 @@ module.exports = class OnvifServer {
     startHttpServer() {
         this.logger.info(`SERVER: ${this.config.name} - HTTP listening on ${this.config.hostname}:${this.config.ports.server}`);
 
-        this.server = http.createServer(this.listen);
+        this.server = http.createServer(this.listen.bind(this));
         this.server.listen(this.config.ports.server, this.config.hostname);
 
         this.deviceService = soap.listen(this.server, {
@@ -384,6 +426,10 @@ module.exports = class OnvifServer {
         this.discoveryMessageNo = 0;
         this.discoverySocket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
 
+        this.discoverySocket.on('error', (err) => {
+            this.logger.error(`DISCOVERY: ${this.config.name} - socket error: ${err.message}`);
+        });
+
         this.discoverySocket.on('message', (message, remote) => {
 
             this.logger.debug(`SERVER: ${this.config.name} - Discovery request from ${remote.address}:${remote.port}`);
@@ -420,7 +466,7 @@ module.exports = class OnvifServer {
                                         <d:Types>dn:NetworkVideoTransmitter</d:Types>
                                         <d:Scopes>
                                             onvif://www.onvif.org/type/video_encoder
-                                            onvif://www.onvif.org/type/ptz
+                                            ${this.ptzProxy ? 'onvif://www.onvif.org/type/ptz' : ''}
                                             onvif://www.onvif.org/hardware/onvif
                                             onvif://www.onvif.org/name/${this.config.name}
                                             onvif://www.onvif.org/location/
@@ -434,7 +480,14 @@ module.exports = class OnvifServer {
 
                     this.discoveryMessageNo++;
                     let responseBuffer = Buffer.from(response);
-                    return dgram.createSocket('udp4').send(responseBuffer, 0, responseBuffer.length, remote.port, remote.address);
+                    const replySocket = dgram.createSocket('udp4');
+                    replySocket.on('error', (sendErr) => {
+                        this.logger.warn(`DISCOVERY: ${this.config.name} - reply send error: ${sendErr.message}`);
+                        replySocket.close();
+                    });
+                    replySocket.send(responseBuffer, 0, responseBuffer.length, remote.port, remote.address, () => {
+                        replySocket.close();
+                    });
                 }
             });
         });

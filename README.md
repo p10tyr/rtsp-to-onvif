@@ -1,233 +1,101 @@
-# 📸 Virtual Onvif Proxy
-Simple docker container to add any RTSP stream into Unify Protect 5+
+# Virtual ONVIF Proxy
 
-This is a continuation from the simple virtual ONVIF proxy that was originally released by Daniela Hase.
-  
-This repository has added features such as ...
-- Making it a pure docker appliance. Pull-And-Run™
-- Only deals with RSTP to ONVIF proxies
-- Auto creates MAC addresses and registers IPv4 with DHCP
-- more to come...
+Fakes ONVIF Device and Media services in front of an RTSP camera so UniFi Protect can adopt it as a native ONVIF cam, then proxies ONVIF Events, PTZ, and Imaging through to the real camera.
 
-What can you adopt?
-- Adopt `IP camera --> RTSP (h264) --> Protect` 
-- Adopt `Raspberry Pi Camera --> uv4l --> RTSP (h254) -- Protect`
-- Adopt `Analog --> NVR --> RTSP (h264) --> Protect` 
-- Adopt `WebCam --> go2rtc --> RTSP (h264) --> Protect`
-- Adopt `... Anything RTSP --> Protect`
+> **In UniFi Protect 7.1.60:**
+>
+> - PTZ joystick control on third-party cameras works without an AI Port. The AI Port is the documented requirement; this proxy makes it work without one.
+> - Motion events from third-party cameras show up on the Protect timeline.
 
-IP camera --> RTSP (h264) --> Protect
+Forked from [p10tyr/rtsp-to-onvif](https://github.com/p10tyr/rtsp-to-onvif), which built the adoption and streaming pieces. This fork adds the service passthroughs that make the two things above work.
 
-![image](https://github.com/user-attachments/assets/7fa9ab55-7830-4602-a1e5-d1ad9184117e)
+## What works
 
-Analog! --> NVR --> RTSP (h264) --> Protect
+- **Motion events** via Protect 7.1.60's third-party motion alert pipeline. `CreatePullPointSubscription` returns a subscription URL hosted on the proxy itself, so the cam stays unreachable on its isolated network. `PullMessages`, `Renew`, `Unsubscribe`, and per-subscription cleanup all work.
+- **PTZ control** for cams with `ptz: true` in config. `ContinuousMove`, `Stop`, `AbsoluteMove`, `RelativeMove`, `GetStatus`, presets. Profile tokens are translated (`main_stream` to `Profile_1`, etc.) so Hikvision-family cams accept the requests instead of returning `ter:NoProfile`.
+- **Imaging settings** for every cam. Brightness, contrast, IR-cut, white balance, focus. Same token translation pattern, `video_src_token` to `VideoSource_1`.
+- **No credentials in config.** The `wsse:Security` UsernameToken Protect sends at every request is forwarded upstream unchanged, so the password you typed at adoption is the one the cam actually validates.
+- **Snapshots** through the existing TCP forwarder. The cam returns a Digest auth challenge, Protect handles the handshake, the image flows back. The upstream README says snapshot is unimplemented; that's stale, it works.
 
-![analog-dvr-rtsp](https://github.com/user-attachments/assets/ef401f8d-c56c-4ab0-8a44-630823a35ad7)
+## Tested on
 
+- 4x Luma Surveillance LUM-310-DOM-IP-BL (Hikvision OEM), firmware V5.5.52
+- 1x Luma LUM-310-PTZ-IP-WH, firmware V5.5.6
+- 1x Luma LUM-510-PTZ-IP-WH, firmware V5.5.6
+- UDM with UniFi Protect 7.1.60
+- Running as a systemd service on a Raspberry Pi (not the upstream's Docker path, but macvlan works the same way)
 
-# 🧾 Getting Started
+The profile and video-source token translation tables are hardcoded against the Hikvision/Luma `Profile_N` / `VideoSource_N` convention. Dahua, Reolink, Amcrest etc. likely use different tokens. If you try this with one of those and PTZ or imaging returns `ter:InvalidArgVal`, open an issue with what your cam's `GetProfiles` and `GetVideoSources` return.
 
-In a few steps you will have everything needed to run container first time. This will auto confiugre IP's for you.
-If you want more control over MAC's and IP's scroll down to Router Setup
+## Performance
 
-## Docker compose
+Sample stats from a Raspberry Pi 4 Model B (4 GB, Debian, Node 18.13), six cameras configured, under normal load (Protect polling for motion events, fetching snapshots, RTSP forwarding through to all 6 cams):
 
-Create a directory locally where you will keep your compose and config files.
+- Memory: around 380 MB RSS after ~1 hour uptime. About 10% of the Pi's 4 GB. Most of the footprint is `node-tcp-proxy` buffering active RTSP streams; the ONVIF SOAP layer itself is minor.
+- CPU: ~65% of one core on average (Node's JS work is single-threaded), which is roughly 16% of total on a 4-core Pi 4.
+- ~25 open TCP connections (RTSP forwarders, snapshot connections, ONVIF SOAP listeners across 6 virtual cams).
+- 1 process, ~11 threads (Node main + libuv pool + V8 helpers).
 
-1. Create a directory and change into it
-  - `mkdir rtsp-to-onvif` and `cd rtsp-to-onvif`
-2. Download the compose.yaml file
-  - `wget https://raw.githubusercontent.com/p10tyr/rtsp-to-onvif/refs/heads/release/compose.yaml`
-3. Download the config.example.yaml and clone it
-  - `wget https://raw.githubusercontent.com/p10tyr/rtsp-to-onvif/refs/heads/release/config.example.yaml`
-  - `cp config.example.yaml config.yaml`
-4. Edit and configure your cameras
-  - `nano config.yaml`
-5. Run compose in attached mode and check for any messages.
-  - `sudo docker compose up`
-6. If you see the cameras show up in Protect then you can run docker in detached mode (or use Dockge, Portainer, etc...)
-  - `sudo docker compose up d`
+The Pi 4 has plenty of headroom. Smaller hardware (Pi 3, Zero 2 W) is untested.
 
+## Install
 
-## Config file
+Same docker compose flow as upstream:
 
-- You just need to supply the bare minimum for each camera
-- Autoconfigure MAC addresses all use Unicast LAA prefix `1A:11:B0` and the NIC address will be random
-- UUID addresses will be added automatically
-- IPv4 will come from your DHCP server
+```bash
+mkdir rtsp-to-onvif && cd rtsp-to-onvif
+wget https://raw.githubusercontent.com/connorgallopo/rtsp-to-onvif/release/compose.yaml
+wget https://raw.githubusercontent.com/connorgallopo/rtsp-to-onvif/release/config.example.yaml
+cp config.example.yaml config.yaml
+nano config.yaml
+sudo docker compose up
+```
 
-> ℹ️ **NOTE** 
-> 
-> This file will be overwritten during automatic configuration so comments will be lost.
-> 
-> No username or passwords required here!
+If the cameras show up in Protect's adoption queue, you're good. `sudo docker compose up -d` to detach.
 
+## Config
+
+Bare-minimum per camera, with the new `ptz: true` flag on cams that support PTZ:
 
 ```yaml
 onvif:
-  - name: BulletCam                               # A user define named that will show up in the consumer device. Use letters only, no spaces or special characters
-    dev: enp2s0 #eth0                             # Network interface to add virtual IP's too. use ip addr to find your name
+  - name: FrontDoor
+    dev: eth0
+    ptz: false                        # set true if this cam supports PTZ
     target:
-      hostname: 192.168.1.187                      # Your cameras IPv4 address
+      hostname: 192.168.1.187
       ports:
-        rtsp: 554                                  # Your cameras RTSP port. Typically 554
-        snapshot: 80                               # Cameras non https port for snapshots
+        rtsp: 554
+        snapshot: 80
     highQuality:
-      rtsp: /Streaming/Channels/101/                    # The RTSP Path
-      snapshot: /ISAPI/Streaming/Channels/101/picture   # Snapshot path - not working yet
-      width: 2048                                       # The Video Width
-      height: 1536                                      # The Video Height
-      framerate: 15                                     # The Video Framerate/FPS
-      bitrate: 3072                                     # The Video Bitrate in kb/s
-      quality: 4                                        # Quality, leave this as 4 for the high quality stream.
-    ports:                                              # Virtual server ports. No need to change these unles you run into port already in use problems
+      rtsp: /Streaming/Channels/101/
+      snapshot: /ISAPI/Streaming/Channels/101/picture
+      width: 1920
+      height: 1080
+      framerate: 30
+      bitrate: 4096
+      quality: 4
+    ports:
       server: 8081
       rtsp: 8554
       snapshot: 8080
-    #mac - automatically added here and IP comes from DHCP- Add your own if you know what you doing
-    #uuid - ONVIF ID - automatically added here. If you change it Protect will think its a different camera
 ```
 
+MAC and UUID are auto-generated on first run.
+
+## Notes
+
+- Credentials go in Protect at adoption time. They're not stored on the proxy or in `config.yaml`. The proxy forwards the WS-Security header Protect sends, so the password Protect knows is the one the cam validates.
+- PTZ is gated by a per-cam `ptz: true` flag. Auto-detection would need either credentials in config (against the no-creds-in-config rule) or refactoring `device_service` out of the SOAP library binding.
+- Each downstream client gets its own upstream event subscription. Cams advertise `MaxPullPoints=10`, the proxy caps at 32 active subs per cam, so a single Protect controller is fine. Multi-consumer setups (Protect plus Frigate plus Scrypted on the same proxy) burn upstream slots 1:1 with consumers.
+
+## Not tested
+
+- Smart event topics (`tns1:RuleEngine/ObjectDetector`, person/vehicle classifiers). The cams I have don't emit them. The proxy passes through whatever topics the cam advertises, so if your cam emits these they should reach Protect.
+- Non-Hikvision-family cameras. Profile and video-source token translation tables assume the `Profile_N` / `VideoSource_N` naming convention.
+- Protect versions other than 7.1.60.
+- Hardware smaller than a Pi 4.
 
 ## Credits
-Thank you Daniela Hase for relasing the original script to the public!
-Original repository https://github.com/daniela-hase/onvif-server
 
-It has truly inspired me and gave me so many ideas! 
-That is why I had to fork your original repo so that I could develop this further to be a docker appliance.
-
-## Unifi Protect
-Tested on Unifi Protect 5.0.40+
-
-Once the device shows up in protect, make sure the correct MAC address is assigned to the IP before adopting. 
-You can then adopt it and provide the username and password that are set on the real RTSP device.
-
-Known Limitations
-
-> "Third-party features such as analytics, audio playback, and pan-tilt-zoom (PTZ) control are not supported." - Unify Support
-
-- Seems to only support recording normal/high profile h264 video streams at the moment
-- Your luck with h265 may vary
-- Scrubbing does not seem to work? Possibly depends on the h264 implementaion on the camera
-- Snapshot not implemented yet. Hope it works.
-- HighProfile support only for now - You can supply LowProfile but that shows up as an extra camera.
-
-
-# ⚒️ Roadmap
-- Simplyfy docker - DONE
-  - Only run in Docker - DONE
-  - Auto virtual MAC registrations - DONE
-  - Register with DCHP - DONE
-  - More debug messages - DONE
-- Learn about the ONVIF Profile S
-  - Implement snapshot functionality?
-  - Implement some other features?
-
-
-# 🛜 Docker and Docker Compose
-
-Debug is enabled byu default in compose.yaml
-Once you have setup complete you can disable it.
-
-## compose.yaml file 
-
-You don't really have to change anything in this file.
-It has all the settings and permsions required to make it just work.
-
-Some properties
-- `volumnes: ./config.yaml:/onvif.yaml` - where your config file is. Next step
-- `cap_add: NET_ADMIN` - Required to create virtual networks based on config file
-- `environment: DEBUG:1` - Uncommnet if you need more debug logs to show up
-
-## Router setup
-
-ONVIF discovery works by using MAC addresses.
-If you are happy with DHCP you can skip this step
-
-If you really static reservations - Do that BEFORE running the container.
-
-Add static reservatations using LAA MAC's
-- MAC's starting with `x2:xx:xx:xx:xx:xx`,`x6:xx:xx:xx:xx:xx`,`xA:xx:xx:xx:xx:xx` and `xE:xx:xx:xx:xx:xx` are Locally Administered Addresses (LAA)
-
-
-Virtual ONVIF 1
-- MAC 0A:00:00:00:00:51
-- IP 192.168.51
-
-Virtual ONVIF 2
-- MAC 0A:00:00:00:00:52
-- IP 192.168.52
-
-## Konwn problems
-
-Usuaully mulitple camera will just work out the box with the same server ports working for each virtual IP 
-
-If you seem to have problems like
-- MAC Addresses not showing properly for multiple cameras in Protect
-- Port numbers in use error during startup
-- MAC shows the wrong IP
-
-Generally depends from OS to OS. 
-Eg in Ubuntu 22. 
-
-You need to run these commands to allow virtual interface max advertising - but you still need a differnt port per virtual IP
-
-```bash
-sudo sysctl -w net.ipv4.conf.all.arp_ignore=1
-sudo sysctl -w net.ipv4.conf.all.arp_announce=2
-```
-
-
-### Other stuff
-
-Misc notes
-
----
-
-Remove a virutal IP on the host without rebooting
-`sudo ip link del dev rtsp2onvif_<number>`
-
----
-
-Wrapping an RTSP Stream
-
-This tool is used to create ONVIF devices from regular RTSP streams by creating the following configuration.
-
-Cameras before ONVIF had all kinds of weird and wonderful implemenations
-
-You will have to find out the stream and snapshot details with your own research, by seraching the web for URLS.
-You should verify the stream using VLC and the snapshot URL using a browser.
-
-Things to look out for
-- http is enabled (for snapshots)
-- if snapshot is not working, try admin account. some cameras are like that
-- rtsp is enabled ideally on port 554
-
-**RTSP Example:**
-Assume you have this RTSP stream:
-```txt
-rtsp://192.168.1.32:554/Streaming/Channels/101/
-       \__________/ \_/\______________________/
-            |       Port    |
-         Hostname           |
-                          Path
-```
-If your RTSP url does not have a port it uses the default port 554.
-
-Your RTSP url may contain a username and password - those should NOT be included in the config file.
-Instead you will have to enter them in the software that you plan on consuming this Onvif camera in, for example during adoption in Unifi Protect.
-
-Next you need to figure out the resolution and framerate for the stream. If you don't know them, you can use VLC to open the RTSP stream and check the _Media Information_ (Window -> Media Information) for the _"Video Resolution"_ and _"Frame rate"_ on the _"Codec Details"_ page, and the _"Stream bitrate"_ on the _"Statistics"_ page. The bitrate will fluctuate quite a bit most likely, so just pick a number that is close to it (e.g. 1024, 2048, 4096 ..).
-
-You can either randomly change a few numbers of the UUID, or use a UUIDv4 generator[^3].
-
-If you have a separate low-quality RTSP stream available, fill in the information for the `lowQuality` section above but this shows up as a seperate camera in unify. 
-
-> [!NOTE]
-> Since we don't provide a snapshot url you will onyl see the Onvif logo in certain places in Unifi Protect where it does not show the livestream.
-
-[^1]: [What is MacVLAN?](https://ipwithease.com/what-is-macvlan)
-[^2]: [Wikipedia: Locally Administered MAC Address](https://en.wikipedia.org/wiki/MAC_address#:~:text=Locally%20administered%20addresses%20are%20distinguished,how%20the%20address%20is%20administered.)
-[^3]: [UUIDv4 Generator](https://www.uuidgenerator.net/)
-[^4]: [Virtual Interfaces with different MAC addresses](https://serverfault.com/questions/682311/virtual-interfaces-with-different-mac-addresses)
-
+Daniela Hase wrote the original virtual ONVIF server. Piotr Kula (p10tyr) made it a docker appliance with auto MAC/IP registration and is upstream of this fork.
